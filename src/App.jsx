@@ -1,51 +1,85 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
-import Header from './components/Header';
-import AdminDashboard from './components/admin/AdminDashboard';
-import TeacherDashboard from './components/teacher/TeacherDashboard';
-import GuardianDashboard from './components/guardian/GuardianDashboard';
-import { Sparkles, Heart, Shield, School } from 'lucide-react';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import AppShell from './components/AppShell';
+import LoginPage from './components/auth/LoginPage';
+import FirstTimePasswordModal from './components/auth/FirstTimePasswordModal';
+import { useAppUpdate } from './services/versionChecker';
+
+// Cada rol solo descarga el código de su propio panel.
+const AdminDashboard = lazy(() => import('./components/admin/AdminDashboard'));
+const TeacherDashboard = lazy(() => import('./components/teacher/TeacherDashboard'));
+const GuardianDashboard = lazy(() => import('./components/guardian/GuardianDashboard'));
 
 function MainContent() {
-  const { currentRole } = useApp();
+  const { currentRole, isReady, loadError, loadData } = useApp();
+
+  if (loadError && !isReady) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-800">
+        <p className="font-bold">No se pudo cargar la información.</p>
+        <p className="mt-1">{loadError}</p>
+        <button type="button" onClick={loadData} className="mt-3 rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white">Reintentar</button>
+      </div>
+    );
+  }
+
+  if (!isReady) {
+    return <p className="py-10 text-center text-sm font-semibold text-slate-600">Cargando información...</p>;
+  }
 
   return (
-    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-8">
-      {currentRole === 'admin' && <AdminDashboard />}
-      {currentRole === 'teacher' && <TeacherDashboard />}
-      {currentRole === 'guardian' && <GuardianDashboard />}
-    </main>
+    <div className="space-y-6 sm:space-y-8 w-full overflow-hidden">
+      <Suspense fallback={<p className="py-10 text-center text-sm font-semibold text-slate-600">Cargando panel...</p>}>
+        {currentRole === 'admin' && <AdminDashboard />}
+        {currentRole === 'teacher' && <TeacherDashboard />}
+        {currentRole === 'guardian' && <GuardianDashboard />}
+      </Suspense>
+    </div>
+  );
+}
+
+function AuthenticatedApp() {
+  const { session, profile, isLoading, authError } = useAuth();
+
+  if (isLoading) {
+    return <div className="flex min-h-screen items-center justify-center bg-[var(--color-canvas)] text-sm font-semibold text-slate-600">Cargando sesión...</div>;
+  }
+
+  if (!session || !profile || authError) {
+    return <LoginPage />;
+  }
+
+  return (
+    <AppProvider>
+      <AppShell><MainContent /></AppShell>
+      {profile?.must_change_password && <FirstTimePasswordModal />}
+    </AppProvider>
   );
 }
 
 export default function App() {
-  return (
-    <AppProvider>
-      <div className="min-h-screen bg-[#F7F6FC] text-slate-800 flex flex-col font-sans">
-        <Header />
-        
-        <div className="flex-1">
-          <MainContent />
-        </div>
+  const { updateRequired } = useAppUpdate();
 
-        {/* Footer amigable y limpio */}
-        <footer className="border-t border-purple-100 bg-white/70 py-6 mt-12 text-center text-xs text-slate-600">
-          <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-              <span className="font-bold text-slate-700">Project Nataly</span>
-              <span>— Plataforma de Monitoreo y Comunicación Escolar en Tiempo Real</span>
-            </div>
-            <div className="flex items-center gap-4 text-slate-600">
-              <span>Paleta Pastel & Redondeado</span>
-              <span>•</span>
-              <span>Adaptación Empática con IA</span>
-              <span>•</span>
-              <span className="font-semibold text-purple-700">Demo Interactiva 2026</span>
-            </div>
-          </div>
-        </footer>
+  if (updateRequired) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-900 px-6 text-center text-white select-none">
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-purple-600/20 border border-purple-500/30 text-purple-400 mb-4 animate-pulse">
+          <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+        </div>
+        <h1 className="text-xl font-bold">Actualización requerida</h1>
+        <p className="mt-2 text-sm text-slate-400 max-w-sm">
+          Se requiere una actualización obligatoria para continuar usando Project Nataly. Sigue las instrucciones en pantalla.
+        </p>
       </div>
-    </AppProvider>
+    );
+  }
+
+  return (
+    <AuthProvider>
+      <AuthenticatedApp />
+    </AuthProvider>
   );
 }
