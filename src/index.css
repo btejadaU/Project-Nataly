@@ -154,3 +154,18 @@
   transform: translateY(-1px) !important;
 }
 
+/* Scroll Lock y aislamiento de scroll para modales */
+html.modal-open-scroll-locked,
+body.modal-open-scroll-locked {
+  overflow: hidden !important;
+  touch-action: none !important;
+  overscroll-behavior: none !important;
+}
+
+.modal-scrollable-content {
+  overflow-y: auto !important;
+  touch-action: pan-y !important;
+  overscroll-behavior: contain !important;
+  -webkit-overflow-scrolling: touch !important;
+}
+

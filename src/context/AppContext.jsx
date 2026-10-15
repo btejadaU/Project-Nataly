@@ -1,10 +1,18 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from './AuthContext';
-import { buildAppData, buildAlertsList, createTaskLookups, mapTask } from './appDataMappers';
+import { buildAppData, buildAlertsList, createTaskLookups, mapTask, inferNotificationType } from './appDataMappers';
 import { getReadAlertIds, saveReadAlertId, saveMultipleReadAlertIds } from '../utils/notificationsStorage';
 import { countBy, indexBy } from '../utils/collections';
 import { toLocalISODate } from '../utils/formatters';
+import {
+  APPEAL_STATUS,
+  loadLocalAppeals,
+  saveLocalAppeals,
+  fetchAppealsFromSupabase,
+  persistAppealToSupabase,
+  normalizeAppeal
+} from '../utils/appealsStorage';
 
 const AppContext = createContext();
 
@@ -30,9 +38,12 @@ export function AppProvider({ children }) {
   const [guardians, setGuardians] = useState([]);
   const [students, setStudents] = useState([]);
   const [schedule, setSchedule] = useState([]);
+  const [rawHorarios, setRawHorarios] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [teacherAssignments, setTeacherAssignments] = useState([]);
   const [inAppAlerts, setInAppAlerts] = useState([]);
+  const [appeals, setAppeals] = useState(() => loadLocalAppeals());
+  const [activeDeepLink, setActiveDeepLink] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isReady, setIsReady] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -40,7 +51,30 @@ export function AppProvider({ children }) {
   const [activeTeacherId, setActiveTeacherId] = useState(null);
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [guardianSection, setGuardianSection] = useState('grades');
+  const [teacherSection, setTeacherSection] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname;
+      if (path.includes('/docente/horario')) return 'schedule';
+      if (path.includes('/docente/notas-apeladas')) return 'appeals';
+      if (path.includes('/docente/clases')) return 'classes';
+    }
+    return 'classes';
+  });
   const [gradingSettings, setGradingSettings] = useState({ format: 'one_five', passingValue: 3 });
+
+  useEffect(() => {
+    if (authenticatedRole === 'teacher' && typeof window !== 'undefined') {
+      const targetPath =
+        teacherSection === 'schedule'
+          ? '/docente/horario'
+          : teacherSection === 'appeals'
+          ? '/docente/notas-apeladas'
+          : '/docente/clases';
+      if (window.location.pathname !== targetPath && (window.location.pathname.startsWith('/docente/') || window.location.pathname === '/')) {
+        window.history.replaceState(null, '', targetPath);
+      }
+    }
+  }, [teacherSection, authenticatedRole]);
 
   const isMountedRef = useRef(true);
   const loadRequestRef = useRef(0);
@@ -49,8 +83,17 @@ export function AppProvider({ children }) {
   const subjectsRef = useRef(subjects);
   const gradesRef = useRef(grades);
   const teachersRef = useRef(teachers);
+  const appealsRef = useRef(appeals);
+  const profilesRef = useRef([]);
+  const assignmentsRef = useRef([]);
+  const realtimeDebounceTimerRef = useRef(null);
   const pendingGradeWritesRef = useRef(new Map());
   const gradeWriteChainRef = useRef(new Map());
+
+  useEffect(() => {
+    appealsRef.current = appeals;
+    saveLocalAppeals(appeals);
+  }, [appeals]);
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -95,16 +138,36 @@ export function AppProvider({ children }) {
         supabase.from('perfiles_profesores').select('*'),
         supabase.from('perfiles_acudientes').select('*'),
         supabase.from('configuracion_calificaciones').select('*').eq('id', true).maybeSingle(),
-        supabase.from('asistencias').select('*').order('date', { ascending: false })
+        supabase.from('asistencias').select('*').order('date', { ascending: false }),
+        supabase.from('profesor_materias').select('*').then(res => (res.error ? { data: [] } : res)).catch(() => ({ data: [] }))
       ]);
       if (isStale()) return;
-      const failed = firstError(results);
+      const failed = firstError(results.slice(0, 16));
       if (failed) {
         setLoadError(failed.message);
         return;
       }
 
-      const [salonResult, gradoResult, courseResult, subjectResult, profileResult, studentResult, assignmentResult, scheduleResult, taskResult, gradeResult, notificationResult, adminRoleResult, teacherRoleResult, guardianRoleResult, gradingResult, attendanceResult] = results;
+      const [salonResult, gradoResult, courseResult, subjectResult, profileResult, studentResult, assignmentResult, scheduleResult, taskResult, gradeResult, notificationResult, adminRoleResult, teacherRoleResult, guardianRoleResult, gradingResult, attendanceResult, teacherSubjectsResult] = results;
+
+      profilesRef.current = profileResult.data || [];
+      assignmentsRef.current = assignmentResult.data || [];
+
+      // Cargar y unificar apelaciones (remotas de Supabase + locales de fallback)
+      const localAppeals = loadLocalAppeals();
+      const remoteAppeals = await fetchAppealsFromSupabase(supabase);
+      const mergedAppealsMap = new Map();
+      for (const a of localAppeals) {
+        mergedAppealsMap.set(a.id, a);
+      }
+      if (remoteAppeals) {
+        for (const a of remoteAppeals) {
+          mergedAppealsMap.set(a.id, a);
+        }
+      }
+      const loadedAppeals = Array.from(mergedAppealsMap.values());
+      setAppeals(loadedAppeals);
+
       const data = buildAppData({
         salones: salonResult.data,
         grados: gradoResult.data,
@@ -121,7 +184,9 @@ export function AppProvider({ children }) {
         profesores: teacherRoleResult.data,
         acudientes: guardianRoleResult.data,
         configuracionCalificaciones: gradingResult.data,
-        asistencias: attendanceResult.data
+        asistencias: attendanceResult.data,
+        profesorMaterias: teacherSubjectsResult?.data || [],
+        appeals: loadedAppeals
       }, { readAlertIds: getReadAlertIds(), role: authenticatedRole });
 
       setSalones(data.salones);
@@ -135,6 +200,7 @@ export function AppProvider({ children }) {
       setAttendances(data.attendances);
       setTeacherAssignments(data.teacherAssignments);
       setSchedule(data.schedule);
+      setRawHorarios(data.rawHorarios || []);
       setTasks(data.tasks);
       setInAppAlerts(data.alerts);
       setActiveTeacherId(current => current || (authenticatedRole === 'teacher' ? profileId : data.teachers[0]?.id));
@@ -178,6 +244,111 @@ export function AppProvider({ children }) {
     }
   }, [authenticatedRole]);
 
+  // Recarga ligera y reactiva de datos académicos sin alterar isLoading ni provocar parpadeos
+  const reloadAcademicData = useCallback(async () => {
+    if (!supabase || !isMountedRef.current) return;
+    try {
+      const [taskRes, gradeRes, notifRes, attRes, remoteAppeals] = await Promise.all([
+        supabase.from('tareas').select('*').order('assigned_at', { ascending: false }),
+        supabase.from('calificaciones').select('*'),
+        authenticatedRole === 'admin'
+          ? Promise.resolve({ data: [] })
+          : supabase.from('notificaciones').select('*').order('created_at', { ascending: false }),
+        supabase.from('asistencias').select('*').order('date', { ascending: false }),
+        fetchAppealsFromSupabase(supabase)
+      ]);
+
+      if (!isMountedRef.current) return;
+
+      const localAppeals = loadLocalAppeals();
+      const mergedAppealsMap = new Map();
+      for (const a of localAppeals) mergedAppealsMap.set(a.id, a);
+      if (remoteAppeals) {
+        for (const a of remoteAppeals) mergedAppealsMap.set(a.id, a);
+      }
+      const loadedAppeals = Array.from(mergedAppealsMap.values());
+      setAppeals(loadedAppeals);
+      appealsRef.current = loadedAppeals;
+
+      if (!taskRes.error && !gradeRes.error && taskRes.data) {
+        const lookups = createTaskLookups({
+          grades: gradesRef.current,
+          subjects: subjectsRef.current,
+          teachers: teachersRef.current,
+          profiles: profilesRef.current,
+          assignments: assignmentsRef.current,
+          gradeRows: gradeRes.data || [],
+          appeals: loadedAppeals
+        });
+
+        const mappedTasks = taskRes.data.map(task => mapTask(task, lookups));
+        setTasks(mappedTasks);
+        tasksRef.current = mappedTasks;
+
+        if (!notifRes.error) {
+          const alerts = authenticatedRole === 'admin'
+            ? []
+            : buildAlertsList({
+                rawNotifications: notifRes.data || [],
+                tasks: mappedTasks,
+                students: studentsRef.current,
+                subjects: subjectsRef.current,
+                readAlertIds: getReadAlertIds()
+              });
+          setInAppAlerts(alerts);
+        }
+      }
+
+      if (!attRes.error && attRes.data) {
+        setAttendances(attRes.data);
+      }
+    } catch (err) {
+      console.warn('Error en sincronización académica en tiempo real:', err);
+    }
+  }, [authenticatedRole]);
+
+  // Debounce para mitigar ráfagas de eventos Postgres (ej. guardado de notas en lote)
+  const triggerDebouncedReload = useCallback(() => {
+    if (realtimeDebounceTimerRef.current) {
+      clearTimeout(realtimeDebounceTimerRef.current);
+    }
+    realtimeDebounceTimerRef.current = setTimeout(() => {
+      reloadAcademicData();
+    }, 200);
+  }, [reloadAcademicData]);
+
+  // Sincronización instantánea entre pestañas abiertas en el mismo navegador
+  const broadcastChange = useCallback((action) => {
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('project-nataly-sync');
+        bc.postMessage({ type: 'ACADEMIC_DATA_CHANGED', action, timestamp: Date.now() });
+        bc.close();
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    let bc;
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        bc = new BroadcastChannel('project-nataly-sync');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'ACADEMIC_DATA_CHANGED') {
+            triggerDebouncedReload();
+          }
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return () => {
+      if (bc) bc.close();
+    };
+  }, [triggerDebouncedReload]);
+
   useEffect(() => {
     if (!supabase || authenticatedRole === 'admin') return;
 
@@ -185,24 +356,35 @@ export function AppProvider({ children }) {
     const channel = supabase
       .channel('notificaciones-realtime-channel')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'notificaciones' }, () => {
-        refreshAlerts();
+        triggerDebouncedReload();
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'tareas' }, () => {
-        loadData();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tareas' }, () => {
+        triggerDebouncedReload();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'asistencias' }, () => {
-        refreshAlerts();
+        triggerDebouncedReload();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'calificaciones' }, () => {
+        triggerDebouncedReload();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'apelaciones_calificaciones' }, () => {
+        triggerDebouncedReload();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'perfiles' }, () => {
+        loadData();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'estudiantes' }, () => {
         loadData();
       })
       .subscribe();
 
     // Sondeo de respaldo periódico (cada 15s) y al enfocar pestaña
     const interval = setInterval(() => {
-      refreshAlerts();
+      triggerDebouncedReload();
     }, 15000);
 
     const onWindowFocus = () => {
-      refreshAlerts();
+      triggerDebouncedReload();
     };
     window.addEventListener('focus', onWindowFocus);
 
@@ -211,7 +393,7 @@ export function AppProvider({ children }) {
       clearInterval(interval);
       window.removeEventListener('focus', onWindowFocus);
     };
-  }, [refreshAlerts, loadData, authenticatedRole]);
+  }, [triggerDebouncedReload, loadData, authenticatedRole]);
 
   // ---------------------------------------------------------------------------
   // Calificaciones: actualización optimista + escritura con debounce y serializada
@@ -321,9 +503,15 @@ export function AppProvider({ children }) {
           return false;
         }
       }
+      if (authenticatedRole === 'teacher') {
+        if (alert.isVirtual) return false;
+        if (alert.recipientId && activeTeacherId && alert.recipientId !== activeTeacherId) {
+          return false;
+        }
+      }
       return true;
     }).length;
-  }, [inAppAlerts, authenticatedRole, activeStudentId]);
+  }, [inAppAlerts, authenticatedRole, activeStudentId, activeTeacherId]);
 
   const markAlertAsRead = useCallback(async alertId => {
     if (!alertId) return;
@@ -347,6 +535,12 @@ export function AppProvider({ children }) {
           return false;
         }
       }
+      if (authenticatedRole === 'teacher') {
+        if (alert.isVirtual) return false;
+        if (alert.recipientId && activeTeacherId && alert.recipientId !== activeTeacherId) {
+          return false;
+        }
+      }
       return true;
     });
 
@@ -366,7 +560,7 @@ export function AppProvider({ children }) {
         console.warn('Error al marcar todas las notificaciones como leídas en BD:', err);
       }
     }
-  }, [inAppAlerts, authenticatedRole, activeStudentId]);
+  }, [inAppAlerts, authenticatedRole, activeStudentId, activeTeacherId]);
 
   const createTask = async newTaskData => {
     const { data, error } = await supabase.from('tareas').insert({
@@ -379,35 +573,508 @@ export function AppProvider({ children }) {
       status: 'pending'
     }).select().single();
     if (error) throw error;
-    const mapped = mapTask(data, createTaskLookups({ grades, subjects, teachers }));
+    const mapped = mapTask(data, createTaskLookups({
+      grades: gradesRef.current,
+      subjects: subjectsRef.current,
+      teachers: teachersRef.current,
+      profiles: profilesRef.current,
+      assignments: assignmentsRef.current
+    }));
     setTasks(current => [mapped, ...current]);
+    broadcastChange('TASK_CREATED');
+    await refreshAlerts();
+    return mapped;
+  };
 
-    // Notificar a los acudientes de los estudiantes de este curso
-    const studentsInCourse = students.filter(s => s.gradeId === newTaskData.gradeId && s.guardianId);
-    const subject = subjects.find(s => s.id === newTaskData.subjectId);
-    const subjectName = subject?.name || 'la materia';
-    const dueDateFormatted = newTaskData.dueDate ? `. Fecha de entrega: ${newTaskData.dueDate}` : '';
+  const saveGradesBatch = async (taskId, recordsMap) => {
+    const task = tasksRef.current.find(t => t.id === taskId);
+    if (!task) throw new Error('Tarea no encontrada');
 
-    if (studentsInCourse.length > 0) {
-      const notifRows = studentsInCourse.map(st => ({
-        recipient_id: st.guardianId,
-        student_id: st.id,
-        assignment_id: data.id,
-        title: `Nueva Tarea: ${newTaskData.title}`,
-        message: `Se asignó una nueva tarea en ${subjectName}: "${newTaskData.title}"${dueDateFormatted}.`,
+    const entries = Object.entries(recordsMap || {});
+    if (entries.length === 0) return [];
+
+    const nowIso = new Date().toISOString();
+    const upsertRows = entries.map(([studentId, data]) => {
+      const scoreNum = data.score !== null && data.score !== undefined && data.score !== '' ? Number(data.score) : null;
+      return {
+        assignment_id: taskId,
+        student_id: studentId,
+        score: isNaN(scoreNum) ? null : scoreNum,
+        letter_grade: data.letterGrade || (typeof data.score === 'string' && ['A', 'B', 'C', 'D', 'F'].includes(data.score.toUpperCase()) ? data.score.toUpperCase() : null),
+        teacher_note: data.teacherNote || '',
+        ai_message: '',
+        is_notified: true,
+        notified_at: nowIso,
         is_read: false
-      }));
+      };
+    });
 
+    const { data: savedData, error } = await supabase
+      .from('calificaciones')
+      .upsert(upsertRows, { onConflict: 'assignment_id,student_id' })
+      .select();
+
+    if (error) throw error;
+
+    if (supabase) {
       try {
-        await supabase.from('notificaciones').insert(notifRows);
+        await supabase.from('tareas').update({ status: 'notified' }).eq('id', taskId);
+      } catch (e) {
+        console.warn('Aviso al actualizar status de tarea:', e);
+      }
+    }
+
+    // Actualizar estado local de la tarea
+    setTasks(current => current.map(t => {
+      if (t.id !== taskId) return t;
+      const updatedGrades = { ...t.studentGrades };
+      entries.forEach(([studentId, data]) => {
+        const scoreNum = data.score !== null && data.score !== undefined && data.score !== '' ? Number(data.score) : null;
+        updatedGrades[studentId] = {
+          ...(updatedGrades[studentId] || {}),
+          score: isNaN(scoreNum) ? null : scoreNum,
+          letterGrade: data.letterGrade || (typeof data.score === 'string' && ['A', 'B', 'C', 'D', 'F'].includes(data.score.toUpperCase()) ? data.score.toUpperCase() : null),
+          teacherNote: data.teacherNote || '',
+          aiMessage: '',
+          isNotified: true,
+          notifiedAt: nowIso
+        };
+      });
+      return { ...t, status: 'Calificada y Notificada', studentGrades: updatedGrades };
+    }));
+
+    broadcastChange('GRADES_SAVED');
+
+    // Disparar notificaciones a estudiante y acudiente solo si no fueron creadas por el trigger de BD
+    const notifRows = [];
+    for (const [studentId, data] of entries) {
+      if (data.score === null || data.score === undefined || data.score === '') continue;
+      const student = studentsRef.current.find(s => s.id === studentId);
+      if (!student || !student.guardianId) continue;
+
+      const isLetter = typeof data.score === 'string' && ['A', 'B', 'C', 'D', 'F'].includes(data.score.toUpperCase());
+      const formattedScore = isLetter
+        ? data.score.toUpperCase()
+        : Number(data.score).toFixed(1);
+      const studentFirst = student.name.split(' ')[0];
+      const noteSuffix = data.teacherNote?.trim() ? ` Observación del docente: "${data.teacherNote.trim()}".` : '';
+
+      notifRows.push({
+        recipient_id: student.guardianId,
+        student_id: studentId,
+        assignment_id: taskId,
+        title: `Calificación: ${task.subjectName}`,
+        message: `Se registró la nota de ${formattedScore} para ${studentFirst} en la actividad "${task.title}".${noteSuffix}`,
+        is_read: false
+      });
+    }
+
+    if (notifRows.length > 0 && supabase) {
+      try {
+        // Verificar si el trigger de BD ya insertó notificaciones recientes para esta asignación
+        const { data: existingNotifs } = await supabase
+          .from('notificaciones')
+          .select('student_id')
+          .eq('assignment_id', taskId)
+          .gte('created_at', new Date(Date.now() - 30000).toISOString());
+
+        const existingStudentIds = new Set((existingNotifs || []).map(n => n.student_id));
+        const missingRows = notifRows.filter(r => !existingStudentIds.has(r.student_id));
+
+        if (missingRows.length > 0) {
+          await supabase.from('notificaciones').insert(missingRows);
+        }
       } catch (err) {
-        console.warn('Inserción directa de notificaciones (posible RLS o trigger):', err);
+        console.warn('Advertencia al verificar/insertar notificaciones de calificaciones:', err);
       }
     }
 
     await refreshAlerts();
-    return mapped;
+    return savedData;
   };
+
+  const disputeGrade = async ({ taskId, studentId, reason }) => {
+    const student = studentsRef.current.find(s => s.id === studentId);
+    const task = tasksRef.current.find(t => t.id === taskId);
+    if (!task) throw new Error('Actividad no encontrada');
+
+    const existingAppeal = appealsRef.current.find(a =>
+      (a.taskId === taskId || a.assignment_id === taskId) &&
+      (a.studentId === studentId || a.student_id === studentId)
+    ) || task.studentGrades?.[studentId]?.appeal;
+    if (existingAppeal) {
+      throw new Error('Esta actividad ya cuenta con una solicitud de revisión registrada previamente.');
+    }
+
+    const studentFirst = student ? student.name.split(' ')[0] : 'Estudiante';
+    const disputeMessage = `El acudiente de ${student?.name || studentFirst} (${student?.guardianName || 'Acudiente'}) manifestó inconformidad con la nota en "${task.title}" (${task.subjectName}). Motivo: "${reason}".`;
+    const notifTitle = `Inconformidad de nota: ${studentFirst} - ${task.title}`;
+
+    const recipients = [];
+    if (task?.teacherId) recipients.push(task.teacherId);
+    if (student?.guardianId && !recipients.includes(student.guardianId)) recipients.push(student.guardianId);
+
+    const insertedAlerts = [];
+    for (const recId of recipients) {
+      const notifId = crypto.randomUUID();
+      const notifPayload = {
+        id: notifId,
+        recipient_id: recId,
+        student_id: studentId,
+        assignment_id: taskId,
+        title: notifTitle,
+        message: disputeMessage,
+        is_read: false
+      };
+      if (supabase) {
+        try {
+          const { error: notifErr } = await supabase.from('notificaciones').insert(notifPayload);
+          if (notifErr) {
+            console.warn('Aviso al insertar notificación de disputa:', notifErr.message);
+          }
+        } catch (err) {
+          console.warn('Advertencia al registrar notificación de disputa:', err);
+        }
+      }
+      insertedAlerts.push({
+        id: notifId,
+        title: notifTitle,
+        message: disputeMessage,
+        taskId,
+        studentId,
+        recipientId: recId,
+        timestamp: new Date().toISOString(),
+        read: false,
+        isVirtual: false
+      });
+    }
+
+    if (insertedAlerts.length > 0) {
+      setInAppAlerts(current => [...insertedAlerts, ...current]);
+    } else {
+      const fallbackAlerts = recipients.map(recId => ({
+        id: `dispute-${Date.now()}-${recId}`,
+        title: notifTitle,
+        message: disputeMessage,
+        taskId,
+        studentId,
+        recipientId: recId,
+        timestamp: new Date().toISOString(),
+        read: false,
+        isVirtual: false
+      }));
+      setInAppAlerts(current => [...fallbackAlerts, ...current]);
+    }
+
+    await refreshAlerts();
+    return { success: true };
+  };
+
+  const submitGradeAppeal = useCallback(async ({ taskId, studentId, reason }) => {
+    if (!reason || !reason.trim()) {
+      throw new Error('El motivo del desacuerdo es obligatorio.');
+    }
+    const student = studentsRef.current.find(s => s.id === studentId);
+    const task = tasksRef.current.find(t => t.id === taskId);
+    if (!task) throw new Error('Actividad no encontrada.');
+
+    // Verificar si ya existe una apelación previa registrada
+    const existingAppeal = appealsRef.current.find(a =>
+      (a.taskId === taskId || a.assignment_id === taskId) &&
+      (a.studentId === studentId || a.student_id === studentId)
+    ) || task.studentGrades?.[studentId]?.appeal;
+
+    if (existingAppeal) {
+      throw new Error('Esta actividad ya cuenta con una solicitud de revisión registrada previamente. Solo se permite una revisión por actividad.');
+    }
+
+    const appealId = `appeal-${taskId}-${studentId}`;
+    const newAppeal = normalizeAppeal({
+      id: appealId,
+      nota_id: `${taskId}:${studentId}`,
+      assignment_id: taskId,
+      student_id: studentId,
+      guardian_id: (authenticatedRole === 'guardian' && profileId) ? profileId : (student?.guardianId || profileId),
+      teacher_id: task.teacherId,
+      subject_id: task.subjectId,
+      class_group_id: task.gradeId,
+      motivo_acudiente: reason.trim(),
+      estado: APPEAL_STATUS.EN_REVISION,
+      status: APPEAL_STATUS.EN_REVISION,
+      respuesta_docente: '',
+      teacher_response: '',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    });
+
+    // 1. Actualizar estado de apelaciones localmente
+    setAppeals(current => {
+      const next = current.filter(a => a.id !== appealId && a.nota_id !== newAppeal.nota_id);
+      const updated = [newAppeal, ...next];
+      saveLocalAppeals(updated);
+      return updated;
+    });
+
+    // 2. Actualizar estado de tareas localmente
+    setTasks(current => current.map(t => {
+      if (t.id !== taskId) return t;
+      const currentGrade = t.studentGrades?.[studentId] || {};
+      return {
+        ...t,
+        studentGrades: {
+          ...t.studentGrades,
+          [studentId]: {
+            ...currentGrade,
+            appealStatus: APPEAL_STATUS.EN_REVISION,
+            appeal: newAppeal
+          }
+        }
+      };
+    }));
+
+    // 3. Persistir en Supabase (si está configurado)
+    if (supabase) {
+      persistAppealToSupabase(supabase, newAppeal).then(persisted => {
+        if (persisted && persisted.id && persisted.id !== appealId) {
+          setAppeals(current => {
+            const next = current.map(a =>
+              (a.id === appealId || a.nota_id === newAppeal.nota_id) ? { ...a, id: persisted.id } : a
+            );
+            saveLocalAppeals(next);
+            return next;
+          });
+        }
+      }).catch(err => {
+        console.warn('Aviso al guardar apelación en Supabase:', err);
+      });
+    }
+
+    // 4. Despachar notificación al docente titular
+    const studentFirst = student ? student.name.split(' ')[0] : 'Estudiante';
+    const notifTitle = `Solicitud de Revisión: ${studentFirst} - ${task.title}`;
+    const notifMessage = `El acudiente de ${student?.name || studentFirst} solicitó formalmente la revisión de la nota en "${task.title}" (${task.subjectName}). Motivo: "${reason.trim()}".`;
+
+    const notifId = crypto.randomUUID();
+    const notificationPayload = {
+      id: notifId,
+      recipient_id: task.teacherId,
+      student_id: studentId,
+      assignment_id: taskId,
+      title: notifTitle,
+      message: notifMessage,
+      is_read: false
+    };
+
+    const createdAlert = {
+      id: notifId,
+      title: notifTitle,
+      message: notifMessage,
+      taskId,
+      studentId,
+      recipientId: task.teacherId,
+      timestamp: new Date().toISOString(),
+      read: false,
+      isVirtual: false,
+      tipo: 'APELACION_NOTA',
+      referencia_id: newAppeal.id,
+      metadata: {
+        tipo: 'APELACION_NOTA',
+        referencia_id: newAppeal.id,
+        taskId,
+        studentId
+      }
+    };
+
+    if (supabase && task.teacherId) {
+      try {
+        const { error: notifErr } = await supabase.from('notificaciones').insert(notificationPayload);
+        if (notifErr) {
+          console.warn('Aviso al insertar notificación de apelación en BD:', notifErr.message);
+        }
+      } catch (err) {
+        console.warn('Advertencia al insertar notificación en BD:', err);
+      }
+    }
+
+    setInAppAlerts(current => [createdAlert, ...current]);
+
+    broadcastChange('GRADE_APPEAL');
+    await refreshAlerts();
+    return newAppeal;
+  }, [profileId, refreshAlerts, broadcastChange]);
+
+  const resolveGradeAppeal = useCallback(async ({ appealId, taskId, studentId, decision, respuestaDocente }) => {
+    const existingAppeal = appealsRef.current.find(
+      a => a.id === appealId || (a.taskId === taskId && a.studentId === studentId) || (a.assignment_id === taskId && a.student_id === studentId)
+    );
+    const effectiveTaskId = taskId || existingAppeal?.assignment_id || existingAppeal?.taskId;
+    const effectiveStudentId = studentId || existingAppeal?.student_id || existingAppeal?.studentId;
+
+    const student = studentsRef.current.find(s => s.id === effectiveStudentId);
+    const task = tasksRef.current.find(t => t.id === effectiveTaskId);
+
+    let newStatus;
+    if (decision === 'ACCEPT') {
+      newStatus = APPEAL_STATUS.REVISION_ACEPTADA;
+    } else if (decision === 'CALIFICADA' || decision === 'RESOLVED' || decision === 'REVISION_COMPLETADA') {
+      newStatus = APPEAL_STATUS.CALIFICADA;
+    } else {
+      newStatus = APPEAL_STATUS.REVISION_RECHAZADA;
+    }
+
+    const isAccepted = newStatus === APPEAL_STATUS.REVISION_ACEPTADA;
+    const isCalificada = newStatus === APPEAL_STATUS.CALIFICADA;
+
+    const defaultRejectMsg = 'Tras la revisión de la solicitud, la calificación se mantiene ya que refleja fielmente los criterios y el desempeño demostrado en la actividad.';
+    const finalComment = newStatus === APPEAL_STATUS.CALIFICADA
+      ? (respuestaDocente?.trim() || 'Calificación actualizada tras revisión en clase.')
+      : (decision === 'ACCEPT'
+        ? (respuestaDocente?.trim() || 'La solicitud de revisión ha sido aceptada. La calificación se revisará en la próxima clase.')
+        : (respuestaDocente?.trim() || defaultRejectMsg));
+
+    const updatedAppeal = normalizeAppeal({
+      ...(existingAppeal || {}),
+      id: appealId || existingAppeal?.id || `appeal-${effectiveTaskId}-${effectiveStudentId}`,
+      nota_id: `${effectiveTaskId}:${effectiveStudentId}`,
+      assignment_id: effectiveTaskId,
+      student_id: effectiveStudentId,
+      guardian_id: student?.guardianId || existingAppeal?.guardian_id,
+      teacher_id: task?.teacherId || existingAppeal?.teacher_id,
+      subject_id: task?.subjectId || existingAppeal?.subject_id,
+      class_group_id: task?.gradeId || existingAppeal?.class_group_id,
+      estado: newStatus,
+      status: newStatus,
+      respuesta_docente: finalComment,
+      teacher_response: finalComment,
+      updated_at: new Date().toISOString()
+    });
+
+    setAppeals(current => {
+      const next = current.map(a => (a.id === updatedAppeal.id || a.nota_id === updatedAppeal.nota_id) ? updatedAppeal : a);
+      saveLocalAppeals(next);
+      return next;
+    });
+
+    setTasks(current => current.map(t => {
+      if (t.id !== effectiveTaskId) return t;
+      const currentGrade = t.studentGrades?.[effectiveStudentId] || {};
+      return {
+        ...t,
+        studentGrades: {
+          ...t.studentGrades,
+          [effectiveStudentId]: {
+            ...currentGrade,
+            appealStatus: newStatus,
+            appeal: updatedAppeal
+          }
+        }
+      };
+    }));
+
+    if (supabase) {
+      persistAppealToSupabase(supabase, updatedAppeal).then(persisted => {
+        if (persisted && persisted.id && persisted.id !== updatedAppeal.id) {
+          setAppeals(current => {
+            const next = current.map(a =>
+              (a.id === updatedAppeal.id || a.nota_id === updatedAppeal.nota_id) ? { ...a, id: persisted.id } : a
+            );
+            saveLocalAppeals(next);
+            return next;
+          });
+        }
+      }).catch(err => {
+        console.warn('Aviso al persistir resolución en Supabase:', err);
+      });
+    }
+
+    // Despachar notificación automática al acudiente
+    const guardianId = student?.guardianId || updatedAppeal.guardian_id;
+    if (guardianId) {
+      const studentFirst = student ? student.name.split(' ')[0] : 'Estudiante';
+      const notifTitle = isCalificada
+        ? `Revisión Aceptada y Calificada: ${studentFirst} - ${task?.subjectName || 'Calificación'}`
+        : isAccepted
+          ? `Revisión Aceptada: ${studentFirst} - ${task?.subjectName || 'Calificación'}`
+          : `Revisión Rechazada: ${studentFirst} - ${task?.subjectName || 'Calificación'}`;
+
+      const notifId = crypto.randomUUID();
+      const notifPayload = {
+        id: notifId,
+        recipient_id: guardianId,
+        student_id: effectiveStudentId,
+        assignment_id: effectiveTaskId,
+        title: notifTitle,
+        message: finalComment,
+        is_read: false
+      };
+
+      const createdAlert = {
+        id: notifId,
+        title: notifTitle,
+        message: finalComment,
+        taskId: effectiveTaskId,
+        studentId: effectiveStudentId,
+        recipientId: guardianId,
+        timestamp: new Date().toISOString(),
+        read: false,
+        isVirtual: false,
+        tipo: 'RESOLUCION_APELACION',
+        referencia_id: updatedAppeal.id,
+        metadata: {
+          tipo: 'RESOLUCION_APELACION',
+          referencia_id: updatedAppeal.id,
+          taskId: effectiveTaskId,
+          studentId: effectiveStudentId,
+          decision: newStatus
+        }
+      };
+
+      if (supabase) {
+        try {
+          const { error: notifErr } = await supabase.from('notificaciones').insert(notifPayload);
+          if (notifErr) {
+            console.warn('Aviso al insertar notificación de resolución en BD:', notifErr.message);
+          }
+        } catch (err) {
+          console.warn('Advertencia al insertar notificación de resolución en BD:', err);
+        }
+      }
+
+      setInAppAlerts(current => [createdAlert, ...current]);
+    }
+
+    broadcastChange('APPEAL_RESOLVED');
+    await refreshAlerts();
+    return updatedAppeal;
+  }, [refreshAlerts, broadcastChange]);
+
+  const triggerDeepLink = useCallback((alert) => {
+    if (!alert) return;
+    if (!alert.read) {
+      markAlertAsRead(alert.id);
+    }
+    const tipo = alert.tipo || alert.metadata?.tipo || inferNotificationType(alert);
+    const taskId = alert.taskId || alert.assignment_id || alert.assignmentId || alert.metadata?.taskId;
+    const studentId = alert.studentId || alert.student_id || alert.metadata?.studentId;
+    const referenciaId = alert.referencia_id || alert.referenciaId || alert.metadata?.referencia_id;
+
+    const matchingAppeal = appealsRef.current.find(
+      a => a.id === referenciaId || (taskId && studentId && (a.taskId === taskId || a.assignment_id === taskId) && (a.studentId === studentId || a.student_id === studentId))
+    );
+
+    setActiveDeepLink({
+      tipo: tipo || 'NOTA',
+      taskId,
+      studentId,
+      referenciaId,
+      alert,
+      appeal: matchingAppeal || null
+    });
+  }, [markAlertAsRead]);
+
+  const clearDeepLink = useCallback(() => {
+    setActiveDeepLink(null);
+  }, []);
 
   const notifyGuardian = async (taskId, studentId) => {
     const student = students.find(item => item.id === studentId);
@@ -426,25 +1093,107 @@ export function AppProvider({ children }) {
     }
 
     const notifiedAt = new Date().toISOString();
-    const results = await Promise.all([
+    const notifId = crypto.randomUUID();
+    const notifPayload = {
+      id: notifId,
+      recipient_id: guardianId,
+      student_id: studentId,
+      assignment_id: taskId,
+      title: `Calificación notificada para ${student.name.split(' ')[0]}`,
+      message: `${task.subjectName}: calificación de ${grade.score ?? 'N/A'} en "${task.title}".`,
+      is_read: false
+    };
+
+    const updateResults = await Promise.all([
       supabase.from('calificaciones').update({ is_notified: true, notified_at: notifiedAt, is_read: false }).eq('assignment_id', taskId).eq('student_id', studentId),
-      supabase.from('tareas').update({ status: 'notified' }).eq('id', taskId),
-      supabase.from('notificaciones').insert({ recipient_id: guardianId, student_id: studentId, assignment_id: taskId, title: `Calificación notificada para ${student.name.split(' ')[0]}`, message: `${task.subjectName}: calificación de ${grade.score ?? 'N/A'} en "${task.title}".`, is_read: false }).select().single()
+      supabase.from('tareas').update({ status: 'notified' }).eq('id', taskId)
     ]);
-    const failed = firstError(results);
+    const failed = firstError(updateResults);
     if (failed) throw failed;
 
-    const alert = results[2].data;
+    try {
+      const { error: notifErr } = await supabase.from('notificaciones').insert(notifPayload);
+      if (notifErr) console.warn('Aviso en BD al insertar notificación:', notifErr.message);
+    } catch (notifErr) {
+      console.warn('Advertencia al insertar notificación de calificación:', notifErr);
+    }
+
     setTasks(current => current.map(item => item.id === taskId ? { ...item, status: 'Calificada y Notificada', studentGrades: { ...item.studentGrades, [studentId]: { ...item.studentGrades?.[studentId], isNotified: true, notifiedAt, isRead: false } } } : item));
-    if (alert) setInAppAlerts(current => [{ id: alert.id, title: alert.title, message: alert.message, taskId, studentId, timestamp: 'Justo ahora', read: false }, ...current]);
+    setInAppAlerts(current => [{ id: notifId, title: notifPayload.title, message: notifPayload.message, taskId, studentId, timestamp: 'Justo ahora', read: false }, ...current]);
   };
 
   const confirmReadNotification = async (taskId, studentId) => {
     const readAt = new Date().toISOString();
-    const { error } = await supabase.rpc('confirmar_lectura_calificacion', { p_assignment_id: taskId, p_student_id: studentId });
-    if (error) throw error;
-    setTasks(current => current.map(task => task.id === taskId ? { ...task, studentGrades: { ...task.studentGrades, [studentId]: { ...task.studentGrades[studentId], isRead: true, readAt } } } : task));
-    setInAppAlerts(current => current.map(alert => alert.taskId === taskId && alert.studentId === studentId ? { ...alert, read: true } : alert));
+    if (supabase) {
+      try {
+        const { error } = await supabase.rpc('confirmar_lectura_calificacion', { p_assignment_id: taskId, p_student_id: studentId });
+        if (error) console.warn('Aviso en RPC confirmar_lectura_calificacion:', error);
+      } catch (err) {
+        console.warn('Aviso al llamar RPC confirmar_lectura_calificacion:', err);
+      }
+    }
+
+    // Actualizar estado local de la tarea
+    setTasks(current => current.map(task => task.id === taskId ? {
+      ...task,
+      studentGrades: {
+        ...task.studentGrades,
+        [studentId]: { ...(task.studentGrades?.[studentId] || {}), isRead: true, readAt }
+      }
+    } : task));
+
+    // Marcar como leída la notificación original que tenía el acudiente
+    setInAppAlerts(current => current.map(alert => alert.taskId === taskId && alert.studentId === studentId && !String(alert.title || '').toLowerCase().includes('confirmada') ? { ...alert, read: true } : alert));
+
+    // Generar notificación para el docente titular
+    const student = studentsRef.current.find(s => s.id === studentId);
+    const task = tasksRef.current.find(t => t.id === taskId);
+    const teacherId = task?.teacherId;
+
+    if (teacherId) {
+      const studentFirst = student ? student.name.split(' ')[0] : 'Estudiante';
+      const notifTitle = `Lectura confirmada: ${studentFirst} - ${task?.title || 'Actividad'}`;
+      const notifMessage = `El acudiente de ${student?.name || studentFirst} (${student?.guardianName || 'Acudiente'}) confirmó la lectura y firma de la calificación en "${task?.title || 'la tarea'}" (${task?.subjectName || 'Asignatura'}).`;
+
+      const notifId = crypto.randomUUID();
+      const notifPayload = {
+        id: notifId,
+        recipient_id: teacherId,
+        student_id: studentId,
+        assignment_id: taskId,
+        title: notifTitle,
+        message: notifMessage,
+        is_read: false
+      };
+
+      if (supabase) {
+        try {
+          const { error: notifErr } = await supabase.from('notificaciones').insert(notifPayload);
+          if (notifErr) {
+            console.warn('Aviso en BD al insertar confirmación de lectura:', notifErr.message);
+          }
+        } catch (err) {
+          console.warn('Advertencia al insertar notificación de confirmación de lectura:', err);
+        }
+      }
+
+      const createdAlert = {
+        id: notifId,
+        title: notifTitle,
+        message: notifMessage,
+        taskId,
+        studentId,
+        recipientId: teacherId,
+        timestamp: new Date().toISOString(),
+        read: false,
+        isVirtual: false
+      };
+
+      setInAppAlerts(current => [createdAlert, ...current]);
+
+      broadcastChange('CONFIRM_READ');
+      await refreshAlerts();
+    }
   };
 
   const toAttendancePayload = ({ studentId, classGroupId, subjectId, teacherId, date, status, note }) => ({
@@ -475,10 +1224,40 @@ export function AppProvider({ children }) {
       });
       return [...savedByKey.values(), ...next];
     });
-    // Si hubo inasistencia o tardanza, recargar alertas para mostrar inmediatamente la notificación
-    if (payload.some(row => row.status === 'ausente' || row.status === 'tardanza')) {
-      await refreshAlerts();
+
+    // Notificación automática por asistencia a clase confirmada (presente)
+    const presentRecords = payload.filter(r => r.status === 'presente');
+    if (presentRecords.length > 0) {
+      const attendanceNotifs = [];
+      for (const rec of presentRecords) {
+        const student = studentsRef.current.find(s => s.id === rec.student_id);
+        if (!student?.guardianId) continue;
+        const subject = subjectsRef.current.find(sb => sb.id === rec.subject_id);
+        const subjectName = subject?.name || 'su clase';
+        const studentFirst = student.name.split(' ')[0];
+        const dateFormatted = rec.date || toLocalISODate();
+
+        attendanceNotifs.push({
+          recipient_id: student.guardianId,
+          student_id: rec.student_id,
+          title: `Asistencia a Clase Confirmada: ${studentFirst}`,
+          message: `${studentFirst} asistió puntualmente a su clase de ${subjectName} el día ${dateFormatted}.`,
+          is_read: false
+        });
+      }
+
+      if (attendanceNotifs.length > 0) {
+        try {
+          await supabase.from('notificaciones').insert(attendanceNotifs);
+        } catch (err) {
+          console.warn('Advertencia al insertar notificaciones de asistencia puntual:', err);
+        }
+      }
     }
+
+    // Si hubo inasistencia, tardanza o asistencia puntual, recargar alertas
+    broadcastChange('ATTENDANCE_SAVED');
+    await refreshAlerts();
     return saved;
   };
 
@@ -544,11 +1323,87 @@ export function AppProvider({ children }) {
   };
 
   const saveSubject = async (subjectData, subjectId = null) => {
-    const payload = { name: subjectData.name, short_name: subjectData.shortName, icon: subjectData.icon || 'BookOpen', color: subjectData.color || 'purple' };
+    const trimmedName = (subjectData.name || '').trim();
+    if (!trimmedName) {
+      throw new Error('El nombre de la materia es obligatorio.');
+    }
+
+    // Validación de unicidad insensible a mayúsculas/minúsculas y espacios:
+    const normalized = trimmedName.toLowerCase();
+    const duplicate = subjectsRef.current.find(
+      s => s.name.trim().toLowerCase() === normalized && s.id !== subjectId
+    );
+    if (duplicate) {
+      throw new Error(`Ya existe una materia registrada con el nombre "${duplicate.name}".`);
+    }
+
+    const payload = {
+      name: trimmedName,
+      short_name: subjectData.shortName?.trim() || trimmedName,
+      icon: subjectData.icon || 'BookOpen',
+      color: subjectData.color || 'purple'
+    };
+
     const query = subjectId
       ? supabase.from('asignaturas').update(payload).eq('id', subjectId)
       : supabase.from('asignaturas').insert(payload);
+
     const { error } = await query;
+    if (error) {
+      if (error.code === '23505' || error.message?.includes('unique') || error.message?.includes('duplicate')) {
+        throw new Error(`Ya existe una materia registrada con el nombre "${trimmedName}".`);
+      }
+      throw error;
+    }
+    await loadData();
+  };
+
+  const saveTeacherSubjects = async (teacherId, subjectIds = []) => {
+    if (!teacherId) return;
+    try {
+      await supabase.from('profesor_materias').delete().eq('teacher_id', teacherId);
+      if (subjectIds.length > 0) {
+        const rows = subjectIds.map(subId => ({
+          teacher_id: teacherId,
+          subject_id: subId
+        }));
+        await supabase.from('profesor_materias').insert(rows);
+      }
+    } catch (err) {
+      console.warn('Advertencia al sincronizar profesor_materias:', err);
+    }
+    await loadData();
+  };
+
+  const saveScheduleBlock = async (blockData, blockId = null) => {
+    const { classGroupId, subjectId, teacherId, dayOfWeek, startTime, endTime, topic } = blockData;
+    if (!classGroupId || !subjectId || !dayOfWeek || !startTime || !endTime) {
+      throw new Error('Faltan datos obligatorios para guardar la clase en el horario.');
+    }
+
+    const payload = {
+      class_group_id: classGroupId,
+      subject_id: subjectId,
+      teacher_id: teacherId || null,
+      day_of_week: Number(dayOfWeek),
+      start_time: startTime,
+      end_time: endTime,
+      topic: topic || null,
+      is_break: false
+    };
+
+    const query = blockId
+      ? supabase.from('horarios').update(payload).eq('id', blockId)
+      : supabase.from('horarios').insert(payload);
+
+    const { error } = await query;
+    if (error) throw error;
+    await loadData();
+  };
+
+  const deleteScheduleBlock = async blockId => {
+    if (!blockId) return;
+    const { error } = await supabase.from('horarios').delete().eq('id', blockId);
     if (error) throw error;
     await loadData();
   };
@@ -598,12 +1453,29 @@ export function AppProvider({ children }) {
   };
 
   const saveGradingSettings = async settings => {
-    const { error } = await supabase.from('configuracion_calificaciones').upsert({ id: true, format: settings.format, passing_value: settings.passingValue, updated_by: profileId, updated_at: new Date().toISOString() });
+    const payload = {
+      id: true,
+      format: settings.format,
+      passing_value: Number(settings.passingValue),
+      updated_at: new Date().toISOString()
+    };
+    if (profileId) {
+      payload.updated_by = profileId;
+    }
+    let { error } = await supabase.from('configuracion_calificaciones').upsert(payload);
+    if (error && (error.code === '23503' || error.message?.includes('foreign key'))) {
+      delete payload.updated_by;
+      const retry = await supabase.from('configuracion_calificaciones').upsert(payload);
+      error = retry.error;
+    }
     if (error) throw error;
-    setGradingSettings(settings);
+    setGradingSettings({
+      format: settings.format,
+      passingValue: Number(settings.passingValue)
+    });
   };
 
-  return <AppContext.Provider value={{ currentRole: authenticatedRole, isLoading, isReady, loadError, salones, grados, grades, subjects, teachers, guardians, students, schedule, tasks, attendances, teacherAssignments, teacherClassesMap, gradingSettings, activeTeacherId, setActiveTeacherId, activeStudentId, setActiveStudentId, guardianSection, setGuardianSection, activeTeacher, activeStudent, inAppAlerts, unreadAlertsForActiveStudent, unreadAlertsCount: unreadAlertsForActiveStudent, markAlertAsRead, markAllAlertsAsRead, refreshAlerts, createTask, updateStudentGrade, notifyGuardian, confirmReadNotification, saveAttendance, saveAttendanceBatch, assignTeacherToCourse, saveSalon, removeSalon, saveGrado, removeGrado, saveCourse, removeCourse, saveSubject, removeSubject, saveStudent, removeStudent, saveProfile, removeProfile, saveGradingSettings, loadData }}>{children}</AppContext.Provider>;
+  return <AppContext.Provider value={{ currentRole: authenticatedRole, isLoading, isReady, loadError, salones, grados, grades, subjects, teachers, guardians, students, schedule, rawHorarios, tasks, attendances, teacherAssignments, teacherClassesMap, gradingSettings, activeTeacherId, setActiveTeacherId, activeStudentId, setActiveStudentId, guardianSection, setGuardianSection, teacherSection, setTeacherSection, activeTeacher, activeStudent, inAppAlerts, unreadAlertsForActiveStudent, unreadAlertsCount: unreadAlertsForActiveStudent, markAlertAsRead, markAllAlertsAsRead, refreshAlerts, reloadAcademicData, createTask, updateStudentGrade, saveGradesBatch, disputeGrade, submitGradeAppeal, resolveGradeAppeal, appeals, activeDeepLink, triggerDeepLink, clearDeepLink, notifyGuardian, confirmReadNotification, saveAttendance, saveAttendanceBatch, assignTeacherToCourse, saveSalon, removeSalon, saveGrado, removeGrado, saveCourse, removeCourse, saveSubject, removeSubject, saveTeacherSubjects, saveScheduleBlock, deleteScheduleBlock, saveStudent, removeStudent, saveProfile, removeProfile, saveGradingSettings, loadData }}>{children}</AppContext.Provider>;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

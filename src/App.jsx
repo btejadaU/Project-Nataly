@@ -50,10 +50,13 @@ function AuthenticatedApp() {
     return <LoginPage />;
   }
 
+  if (profile?.must_change_password) {
+    return <FirstTimePasswordModal />;
+  }
+
   return (
     <AppProvider>
       <AppShell><MainContent /></AppShell>
-      {profile?.must_change_password && <FirstTimePasswordModal />}
     </AppProvider>
   );
 }

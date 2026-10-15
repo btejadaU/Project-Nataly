@@ -9,11 +9,13 @@ import {
   ArrowLeft,
   ChevronRight,
   Info,
-  X
+  X,
+  CheckCircle2
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
 const SAVED_ROLE_KEY = 'nataly_selected_role';
+const SAVED_IDENTIFIER_KEY = 'nataly_saved_identifier';
 const HAS_LOGGED_IN_KEY = 'nataly_has_logged_in';
 const FIRST_LOGIN_NOTICE_DISMISSED_KEY = 'nataly_notice_dismissed';
 
@@ -49,10 +51,25 @@ export default function LoginPage() {
     return roles.some(r => r.id === saved) ? saved : null;
   });
 
-  const [identifier, setIdentifier] = useState('');
+  const [identifier, setIdentifier] = useState(() => {
+    return localStorage.getItem(SAVED_IDENTIFIER_KEY) || '';
+  });
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [successNotice, setSuccessNotice] = useState(() => {
+    try {
+      const hasNotice = sessionStorage.getItem('nataly_password_updated_notice') === 'true';
+      if (hasNotice) {
+        sessionStorage.removeItem('nataly_password_updated_notice');
+        return '¡Contraseña actualizada exitosamente! Ingresa tu nueva contraseña para continuar.';
+      }
+    } catch {
+      // ignorar
+    }
+    return '';
+  });
 
   const [hasLoggedInBefore, setHasLoggedInBefore] = useState(() => {
     return localStorage.getItem(HAS_LOGGED_IN_KEY) === 'true';
@@ -78,6 +95,7 @@ export default function LoginPage() {
   const handleResetRole = () => {
     setRole(null);
     localStorage.removeItem(SAVED_ROLE_KEY);
+    localStorage.removeItem(SAVED_IDENTIFIER_KEY);
     setIdentifier('');
     setPassword('');
     setError('');
@@ -98,6 +116,7 @@ export default function LoginPage() {
       }
     } else {
       localStorage.setItem(HAS_LOGGED_IN_KEY, 'true');
+      localStorage.setItem(SAVED_IDENTIFIER_KEY, identifier.trim());
       setHasLoggedInBefore(true);
     }
     setIsSubmitting(false);
@@ -123,6 +142,23 @@ export default function LoginPage() {
           {!isSupabaseConfigured && (
             <div className="mb-4 rounded-2xl bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800">
               Falta configurar la conexión a Supabase.
+            </div>
+          )}
+
+          {successNotice && (
+            <div className="mb-4 rounded-2xl bg-emerald-50 border border-emerald-200 p-3 text-xs font-semibold text-emerald-800 flex items-center justify-between gap-2 animate-in fade-in duration-150">
+              <div className="flex items-center gap-2 min-w-0">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{successNotice}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSuccessNotice('')}
+                className="text-emerald-700/60 hover:text-emerald-900 p-0.5 rounded-lg hover:bg-emerald-200/40 transition-colors shrink-0 cursor-pointer"
+                title="Cerrar"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
           )}
 

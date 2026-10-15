@@ -124,6 +124,38 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
+  const reloadProfile = async () => {
+    if (session?.user) {
+      const { data } = await getRoleProfile(session.user.id);
+      if (data) setProfile(data);
+    }
+  };
+
+  // Sincronización en tiempo real para cambios en el perfil institucional
+  useEffect(() => {
+    if (!supabase || !sessionUserId) return undefined;
+
+    const channel = supabase
+      .channel(`profile-sync-${sessionUserId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'perfiles', filter: `id=eq.${sessionUserId}` }, () => {
+        reloadProfile();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'perfiles_profesores', filter: `id=eq.${sessionUserId}` }, () => {
+        reloadProfile();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'perfiles_acudientes', filter: `id=eq.${sessionUserId}` }, () => {
+        reloadProfile();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'perfiles_administradores', filter: `id=eq.${sessionUserId}` }, () => {
+        reloadProfile();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [sessionUserId]);
+
   // Lógica de inactividad: Cierre de sesión automático tras 5 minutos sin interacción.
   // Se registra solo la marca de tiempo por evento (barato incluso con mousemove/scroll)
   // y se verifica periódicamente y al volver la app a primer plano.
@@ -159,13 +191,6 @@ export function AuthProvider({ children }) {
       clearInterval(intervalId);
     };
   }, [sessionUserId]);
-
-  const reloadProfile = async () => {
-    if (session?.user) {
-      const { data } = await getRoleProfile(session.user.id);
-      if (data) setProfile(data);
-    }
-  };
 
   const signIn = async ({ role, identifier, password }) => {
     if (!supabase) return notConfiguredError();
@@ -203,22 +228,38 @@ export function AuthProvider({ children }) {
   };
 
   // Marca en BD que el usuario ya cambió su contraseña temporal.
-  const markPasswordUpdated = async () => {
+  const markPasswordUpdated = async (userId = null) => {
+    const targetUserId = userId || session?.user?.id || profile?.id;
+    setProfile(prev => prev ? { ...prev, must_change_password: false } : prev);
+
+    // 1. Actualizar directamente en la tabla pública perfiles
+    if (targetUserId) {
+      const { error: directError } = await supabase
+        .from('perfiles')
+        .update({ must_change_password: false })
+        .eq('id', targetUserId);
+      if (directError) {
+        console.warn('Fallo update directo en perfiles al marcar contraseña:', directError.message);
+      }
+    }
+
+    // 2. Ejecutar RPC marcar_clave_actualizada
     const { error: rpcError } = await supabase.rpc('marcar_clave_actualizada');
     if (rpcError) {
-      const { error: fallbackError } = await supabase.from('perfiles').update({ must_change_password: false }).eq('id', session?.user?.id);
-      if (fallbackError) console.warn('No se pudo marcar la contraseña como actualizada:', fallbackError.message);
+      console.warn('Fallo RPC marcar_clave_actualizada:', rpcError.message);
     }
-    setProfile(prev => prev ? { ...prev, must_change_password: false } : prev);
   };
 
   const completePasswordChange = async (newPassword) => {
     if (!supabase) return notConfiguredError();
+    const targetUserId = session?.user?.id || profile?.id;
+
+    // 1. Actualizar contraseña en el servicio de Auth
     const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
     if (updateError) return { error: updateError };
 
-    // Marcar como actualizado en la base de datos
-    await markPasswordUpdated();
+    // 2. Marcar como actualizado en la base de datos
+    await markPasswordUpdated(targetUserId);
     return { success: true };
   };
 

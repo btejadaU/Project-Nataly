@@ -41,29 +41,58 @@ export default function FirstTimePasswordModal() {
         return;
       }
 
-      Swal.fire({
+      // Guardar identificador y rol para que al redirigir al login esté preseleccionado
+      const userIdentifier = profile?.document_number || profile?.email || '';
+      if (userIdentifier) {
+        try {
+          localStorage.setItem('nataly_saved_identifier', userIdentifier);
+        } catch {
+          // ignorar si el almacenamiento local está restringido
+        }
+      }
+      if (profile?.role) {
+        try {
+          localStorage.setItem('nataly_selected_role', profile.role);
+        } catch {
+          // ignorar
+        }
+      }
+      try {
+        sessionStorage.setItem('nataly_password_updated_notice', 'true');
+      } catch {
+        // ignorar
+      }
+
+      // Mostrar mensaje de aprobado con SweetAlert2
+      await Swal.fire({
         title: '¡Contraseña actualizada!',
-        text: 'Tu contraseña personal ha sido establecida correctamente. ¡Bienvenido a Project Nataly!',
+        text: 'Tu contraseña personal ha sido establecida correctamente. Por favor, inicia sesión con tu nueva contraseña.',
         icon: 'success',
-        timer: 3000,
-        showConfirmButton: false,
+        confirmButtonText: 'Ir al inicio de sesión',
+        timer: 3500,
+        timerProgressBar: true,
+        allowOutsideClick: false,
+        allowEscapeKey: false,
         customClass: {
           popup: 'dark-swal',
           title: 'dark-swal-title',
-          htmlContainer: 'dark-swal-content'
+          htmlContainer: 'dark-swal-content',
+          confirmButton: 'dark-swal-confirm'
         },
         buttonsStyling: false
       });
+
+      // Redirigir al panel de login cerrando la sesión actual
+      await signOut();
     } catch (err) {
       setErrorMessage(err.message || 'Ocurrió un error inesperado al actualizar.');
-    } finally {
       setIsSubmitting(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-purple-100 p-6 sm:p-8 relative overflow-hidden">
+    <main className="min-h-screen bg-[var(--color-canvas)] flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
+      <div className="w-full max-w-sm sm:max-w-md bg-white rounded-3xl shadow-xl shadow-purple-900/5 border border-purple-100/90 p-6 sm:p-8 relative overflow-hidden">
         
         {/* Adorno superior de color */}
         <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-purple-600 via-indigo-600 to-fuchsia-600" />
@@ -161,6 +190,6 @@ export default function FirstTimePasswordModal() {
         </form>
 
       </div>
-    </div>
+    </main>
   );
 }

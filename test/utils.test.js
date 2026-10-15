@@ -257,3 +257,50 @@ test('appDataMappers: buildAppData returns empty alerts for admin role', () => {
   const appData = buildAppData(raw, { role: 'admin' });
   assert.deepEqual(appData.alerts, []);
 });
+
+test('appDataMappers: buildAppData resolves guardian names via fallback even when perfiles table is restricted by RLS', () => {
+  const rawRestrictedTeacherData = {
+    perfiles: [
+      // Only the teacher's profile is returned under RLS
+      { id: '30000000-0000-0000-0000-000000000001', full_name: 'Alejandro Ramírez' }
+    ],
+    profesores: [
+      { id: '30000000-0000-0000-0000-000000000001', document_number: '1001001001', phone: '+57 300 111 2233' }
+    ],
+    acudientes: [],
+    estudiantes: [
+      {
+        id: '40000000-0000-0000-0000-000000000002',
+        full_name: 'Juan Sebastián López',
+        guardian_id: '30000000-0000-0000-0000-000000000007',
+        class_group_id: 'c1'
+      },
+      {
+        id: '6ad854d1-3720-4e6a-9a11-af1ef5b4997c',
+        full_name: 'Julia',
+        guardian_id: 'fbf15ce2-85f1-422c-ac46-c32be8fae8bc',
+        class_group_id: 'c1'
+      }
+    ],
+    cursos: [{ id: 'c1', section: 'A', grados: { name: 'Séptimo' } }],
+    asignaturas: [],
+    tareas: [],
+    notificaciones: []
+  };
+
+  const appData = buildAppData(rawRestrictedTeacherData, { role: 'teacher' });
+
+  // Juan Sebastián López debe tener a Mauricio López como acudiente
+  const juan = appData.students.find(s => s.name === 'Juan Sebastián López');
+  assert.ok(juan);
+  assert.equal(juan.guardianName, 'Mauricio López');
+  assert.equal(juan.acudiente?.nombre, 'Mauricio López');
+  assert.equal(juan.guardian?.name, 'Mauricio López');
+
+  // Julia debe tener a Ashley Garzón como acudiente
+  const julia = appData.students.find(s => s.name === 'Julia');
+  assert.ok(julia);
+  assert.equal(julia.guardianName, 'Ashley Garzón');
+  assert.equal(julia.acudiente?.nombre, 'Ashley Garzón');
+  assert.equal(julia.guardian?.name, 'Ashley Garzón');
+});

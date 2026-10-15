@@ -2,15 +2,17 @@ import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import AdminManagement from './AdminManagement';
 import StudentEnrollmentModal from './StudentEnrollmentModal';
-import { LayoutGrid, BookOpen, GraduationCap, UserPlus, Users } from 'lucide-react';
+import GradingMethodologyModal from './GradingMethodologyModal';
+import { LayoutGrid, GraduationCap, UserPlus, Users, SlidersHorizontal } from 'lucide-react';
 
 export default function AdminDashboard() {
-  const { grades, subjects, teachers, students } = useApp();
+  const { grades, teachers, students, gradingSettings } = useApp();
   const [activeTab, setActiveTab] = useState('grades');
   const [isEnrollmentOpen, setIsEnrollmentOpen] = useState(false);
+  const [isGradingModalOpen, setIsGradingModalOpen] = useState(false);
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-150">
+    <div className="space-y-6 w-full min-w-0 max-w-full animate-in fade-in duration-150">
 
       {/* Cabecera Limpia Rol Administrador */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-purple-100/70">
@@ -54,18 +56,34 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        <div className="bg-white p-3.5 sm:p-5 rounded-3xl border border-purple-100/80 shadow-xs hover:shadow-md transition-shadow">
+        {/* Tarjeta de Metodología de Calificación */}
+        <button
+          type="button"
+          onClick={() => setIsGradingModalOpen(true)}
+          className="bg-white p-3.5 sm:p-5 rounded-3xl border border-purple-100/80 shadow-xs hover:shadow-md hover:border-purple-300 transition-all cursor-pointer text-left group relative focus:outline-hidden focus:ring-2 focus:ring-purple-500/20"
+        >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] sm:text-xs font-bold uppercase tracking-wider text-slate-600">Materias</span>
-            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-2xl bg-indigo-50 flex items-center justify-center text-indigo-600">
-              <BookOpen className="w-4 h-4 sm:w-5 sm:h-5" />
+            <span className="text-[11px] sm:text-xs font-bold uppercase tracking-wider text-slate-600 group-hover:text-purple-700 transition-colors">
+              Metodología
+            </span>
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-2xl bg-indigo-50 group-hover:bg-purple-100 group-hover:text-purple-700 flex items-center justify-center text-indigo-600 transition-colors">
+              <SlidersHorizontal className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
           </div>
           <div className="mt-2 sm:mt-3">
-            <div className="text-2xl sm:text-3xl font-black text-slate-800">{subjects.length}</div>
-            <p className="text-[11px] sm:text-xs text-slate-600 mt-1">Plan de estudios 2026</p>
+            <div className="text-2xl sm:text-3xl font-black text-slate-800 group-hover:text-purple-900 transition-colors truncate">
+              {gradingSettings?.format === 'zero_hundred'
+                ? '0 a 100'
+                : gradingSettings?.format === 'a_f'
+                ? 'A a F'
+                : '0 a 5'}
+            </div>
+            <p className="text-[11px] sm:text-xs text-slate-600 mt-1 font-medium flex items-center justify-between">
+              <span>Aprueba con: <strong className="text-slate-800">{gradingSettings?.passingValue ?? (gradingSettings?.format === 'zero_hundred' ? 60 : 3.0)}</strong></span>
+              <span className="text-purple-600 font-bold opacity-0 group-hover:opacity-100 transition-opacity text-[10px] sm:text-[11px]">Editar →</span>
+            </p>
           </div>
-        </div>
+        </button>
 
         <div className="bg-white p-3.5 sm:p-5 rounded-3xl border border-purple-100/80 shadow-xs hover:shadow-md transition-shadow">
           <div className="flex items-center justify-between">
@@ -118,6 +136,15 @@ export default function AdminDashboard() {
             Materias
           </button>
           <button
+            onClick={() => setActiveTab('schedule')}
+            className={`flex-1 sm:flex-initial px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer text-center ${activeTab === 'schedule'
+              ? 'bg-white text-purple-900 shadow-xs border border-purple-200/60'
+              : 'text-slate-600 hover:text-purple-700'
+              }`}
+          >
+            Horarios
+          </button>
+          <button
             onClick={() => setActiveTab('students')}
             className={`flex-1 sm:flex-initial px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer text-center ${activeTab === 'students'
               ? 'bg-white text-purple-900 shadow-xs border border-purple-200/60'
@@ -132,12 +159,17 @@ export default function AdminDashboard() {
 
       </div>
 
-      <AdminManagement activeSection={activeTab} />
+      <AdminManagement activeSection={activeTab} onTabChange={setActiveTab} />
 
       <StudentEnrollmentModal
         isOpen={isEnrollmentOpen}
         onClose={() => setIsEnrollmentOpen(false)}
         onEnrolled={() => setActiveTab('students')}
+      />
+
+      <GradingMethodologyModal
+        isOpen={isGradingModalOpen}
+        onClose={() => setIsGradingModalOpen(false)}
       />
     </div>
   );

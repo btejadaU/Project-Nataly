@@ -23,8 +23,10 @@ import Swal from 'sweetalert2';
 import { useAuth } from '../../context/AuthContext';
 import { useApp } from '../../context/AppContext';
 import { escapeHtml } from '../../utils/formatters';
+import { useScrollLock } from '../../utils/useScrollLock';
 
 export default function UserProfileSettingsModal({ isOpen, onClose }) {
+  useScrollLock(isOpen);
   const { profile, role, updatePassword, updateEmail, updatePhone } = useAuth();
   const { activeTeacher, students } = useApp();
 
@@ -77,7 +79,7 @@ export default function UserProfileSettingsModal({ isOpen, onClose }) {
     resetPasswordForm();
   }
 
-  // Manejar tecla Escape y bloqueo de scroll de fondo
+  // Manejar tecla Escape
   useEffect(() => {
     if (!isOpen) return;
 
@@ -85,12 +87,9 @@ export default function UserProfileSettingsModal({ isOpen, onClose }) {
       if (e.key === 'Escape') onClose();
     };
 
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
-      document.body.style.overflow = originalOverflow;
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [isOpen, onClose]);
@@ -175,6 +174,7 @@ export default function UserProfileSettingsModal({ isOpen, onClose }) {
       });
 
       setActiveTab('profile');
+      onClose();
     } catch (err) {
       setErrorMessage(err.message || 'Error inesperado.');
     } finally {
@@ -297,22 +297,9 @@ export default function UserProfileSettingsModal({ isOpen, onClose }) {
             <X className="w-4 h-4" />
           </button>
 
-          <div className="flex items-center gap-4">
-            <div className="relative">
-              {profile?.avatar_url ? (
-                <img
-                  src={profile.avatar_url}
-                  alt={profile.full_name}
-                  className="w-14 h-14 rounded-2xl object-cover border-2 border-white/40 shadow-md"
-                />
-              ) : (
-                <div className="w-14 h-14 rounded-2xl bg-white/20 border border-white/30 text-white flex items-center justify-center font-black text-lg shadow-md">
-                  {userInitials}
-                </div>
-              )}
-              <span className="absolute -bottom-1 -right-1 p-1 rounded-lg bg-emerald-500 border border-white" title="Activo">
-                <RoleIconComponent className="w-3 h-3 text-white" />
-              </span>
+          <div className="flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-2xl bg-white/20 border border-white/30 text-white flex items-center justify-center shrink-0 shadow-md">
+              <RoleIconComponent className="w-6 h-6 text-white" />
             </div>
 
             <div className="min-w-0 flex-1">

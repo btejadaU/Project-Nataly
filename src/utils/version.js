@@ -1,5 +1,5 @@
 // Versión actual instalada en el dispositivo
-export const CURRENT_VERSION = '0.0.5';
+export const CURRENT_VERSION = '0.0.8';
 
 function parseVersion(version) {
   return String(version)
